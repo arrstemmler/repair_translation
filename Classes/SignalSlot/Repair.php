@@ -73,21 +73,9 @@ class Repair
     public function modifySysFileReferenceLanguage(QueryInterface $query, array $result)
     {
         if ($this->isSysFileReferenceTable($query)) {
-            $origTranslatedReferences = $this->reduceResultToTranslatedRecords($result);
             $newTranslatedReferences = $this->getNewlyCreatedTranslatedSysFileReferences($query);
-
-            $record = current($result);
-            if (
-                is_array($record) &&
-                isset($GLOBALS['TCA'][$record['tablenames']]['columns'][$record['fieldname']]['l10n_mode']) &&
-                $GLOBALS['TCA'][$record['tablenames']]['columns'][$record['fieldname']]['l10n_mode'] === 'mergeIfNotBlank'
-            ) {
-                // if translation is empty, but mergeIfNotBlank is set, than use the image from default language
-                // keep $result as it is
-            } else {
-                // merge with the translated image. If translation is empty $result will be empty, too
-                $result = array_merge($origTranslatedReferences, $newTranslatedReferences);
-            }
+            $origTranslatedReferences = $this->getFileReferences($result, !empty($newTranslatedReferences));
+            $result = array_merge($origTranslatedReferences, $newTranslatedReferences);
         }
 
         return array(
@@ -97,24 +85,57 @@ class Repair
     }
 
     /**
-     * Reduce sysFileReference array to translated records
+     * Gets the records for the object
      *
      * @param array $sysFileReferenceRecords
-     *
+     * @param bool $languageReferencesExist true if there are standalone file references for the current language
      * @return array
      */
-    protected function reduceResultToTranslatedRecords(array $sysFileReferenceRecords)
+    protected function getFileReferences($sysFileReferenceRecords, $languageReferencesExist = false)
     {
-        $translatedRecords = array();
-        foreach ($sysFileReferenceRecords as $key => $record) {
-            if (isset($record['_LOCALIZED_UID'])) {
-                // The image reference in translated parent record was not manually deleted.
-                // So, l10n_parent is filled and we have a valid translated sys_file_reference record here
-                $translatedRecords[] = $record;
+        $records = [];
+
+        if (!empty($sysFileReferenceRecords)) {
+            $translationExists = false;
+            $l10nMode = $this->getL10nMode($sysFileReferenceRecords[0]);
+
+            foreach ($sysFileReferenceRecords as $key => $record) {
+                if ($l10nMode === 'mergeIfNotBlank') {
+                    // bypass the record and filter later depending on the translation status
+                    $records[] = $record;
+                    if (isset($record['_LOCALIZED_UID'])) {
+                        $translationExists = true;
+                    }
+                    continue;
+                }
+
+                if ($l10nMode === 'exclude') {
+                    // get the original records only
+                    if (!isset($record['_LOCALIZED_UID'])) {
+                        $records[] = $record;
+                    }
+                    continue;
+                }
+
+                if (isset($record['_LOCALIZED_UID'])) {
+                    // The image reference in translated parent record was not manually deleted.
+                    // So, l10n_parent is filled and we have a valid translated sys_file_reference record here
+                    $records[] = $record;
+                    $translationExists = true;
+                }
+            }
+
+            // filter records for mergedIfNotBlank
+            if ($l10nMode === 'mergeIfNotBlank') {
+                if ($languageReferencesExist || $translationExists) {
+                    $records = array_filter($records, function ($record) {
+                        return isset($record['_LOCALIZED_UID']);
+                    });
+                }
             }
         }
 
-        return $translatedRecords;
+        return $records;
     }
 
     /**
@@ -212,5 +233,30 @@ class Repair
     protected function getDatabaseConnection()
     {
         return $GLOBALS['TYPO3_DB'];
+    }
+
+    /**
+     * Get TYPO3s TCA table configuration array
+     *
+     * @return array
+     */
+    protected function getTCA()
+    {
+        return $GLOBALS['TCA'];
+    }
+
+    /**
+     * Gets the l10n_mode for the record from tca configuration
+     *
+     * @var array $record the sysFileReference record
+     * @return string
+     */
+    protected function getL10nMode($record)
+    {
+        $table = $record['tablenames'];
+        $fieldName = $record['fieldname'];
+        $tca = $this->getTCA();
+
+        return $tca[$table]['columns'][$fieldName]['l10n_mode'] ?? '';
     }
 }
